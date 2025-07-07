@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VRP Advanced Visualization</title>
+    
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    
+    <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    
+    <style>
+        body { padding-top: 20px; background-color: #f4f7f6; }
+        #map { height: 550px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        .card { margin-top: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .loader { display: none; text-align: center; padding: 20px; }
+        .result-item { padding: 8px; border-bottom: 1px solid #eee; }
+        .result-item:last-child { border-bottom: none; }
+        .savings { font-size: 1.25rem; font-weight: bold; color: #28a745; }
+        .card-header.best-option { background-color: #28a745; color: white; }
+        .card-header.trial-option { background-color: #ffc107; color: #212529; }
+        .customer-label {
+            background-color: rgba(255, 255, 255, 0.8);
+            border: 1px solid #666;
+            border-radius: 4px;
+            padding: 2px 5px;
+            font-size: 12px;
+            font-weight: bold;
+            text-align: center;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="text-center mb-4">
+            <h1 class="display-4">VRP Hybrid Dashboard</h1>
+            <p class="lead">Visualisasi Peta dengan Rute Berwarna per Segmen</p>
+        </div>
+        
+        <div class="row">
+            <div class="col-lg-7">
+                <div id="map"></div>
+            </div>
+            
+            <div class="col-lg-5">
+                <div class="card mb-3">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">Kontrol Optimisasi</h5>
+                        <button id="optimizeBtn" class="btn btn-primary btn-lg">Cari Opsi Terbaik</button>
+                    </div>
+                </div>
+
+                <div id="loader" class="loader">
+                    <div class="spinner-border" role="status"><span class="sr-only">Loading...</span></div>
+                    <p class="mt-2">Mencari solusi...</p>
+                </div>
+
+                <div id="results-container" style="display:none;">
+                    <div id="trial-results" class="card">
+                        <div class="card-header trial-option"><strong>Hasil Percobaan Saat Ini</strong></div>
+                        <div class="card-body" id="current-trial-details"></div>
+                    </div>
+
+                    <div id="best-results" class="card">
+                        <div class="card-header best-option"><strong>🏆 Opsi Terbaik Ditemukan (Rekor)</strong></div>
+                        <div class="card-body">
+                            <div id="optimized-details"></div>
+                            <hr>
+                            <div id="summary" class="text-center">
+                                <p id="initial-distance" class="mb-1"></p>
+                                <p id="optimized-distance" class="font-weight-bold mb-1"></p>
+                                <p id="total-savings" class="savings mt-2"></p>
+                            </div>
+                            <hr>
+                            <div id="legend"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    const depotLat = {{ data.depot.lat }};
+    const depotLon = {{ data.depot.lon }};
+    const map = L.map('map').setView([depotLat, depotLon], 12);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    const routeLayers = L.layerGroup().addTo(map);
+    const customers = {{ data.customers | tojson }};
+    
+    // --- PERUBAHAN: Palet warna utama untuk setiap kendaraan ---
+    const baseColors = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#17a2b8'];
+
+    // --- FUNGSI BARU: Untuk menghasilkan gradasi warna ---
+    // Fungsi ini akan membuat warna menjadi lebih gelap secara bertahap
+    function darkenColor(color, percent) {
+        let f=parseInt(color.slice(1),16),t=percent<0?0:255,p=percent<0?percent*-1:percent,R=f>>16,G=f>>8&0x00FF,B=f&0x0000FF;
+        return "#"+(0x1000000+(Math.round((t-R)*p)+R)*0x10000+(Math.round((t-G)*p)+G)*0x100+(Math.round((t-B)*p)+B)).toString(16).slice(1);
+    }
+
+    // --- PERUBAHAN UTAMA DI FUNGSI drawRoutes ---
+    function drawRoutes(routeDetails) {
+        routeLayers.clearLayers();
+        const legend = $('#legend').html('<h6>Legenda Rute</h6>');
+
+        routeDetails.forEach((detail, vehicleIndex) => {
+            if (!detail.geometry || detail.geometry.length === 0) return;
+
+            // Pilih warna dasar untuk kendaraan ini
+            const baseColor = baseColors[vehicleIndex % baseColors.length];
+            legend.append(`<div style="color:${baseColor};">■ Kendaraan ${detail.vehicle_id}</div>`);
+
+            // Pecah geometri menjadi segmen-segmen
+            // Geometri adalah daftar [lat, lon], kita perlu menggambar garis antar setiap pasang titik
+            for (let i = 0; i < detail.geometry.length - 1; i++) {
+                const segment = [detail.geometry[i], detail.geometry[i+1]];
+                
+                // Buat warna unik untuk segmen ini dengan menggelapkan warna dasar
+                const segmentColor = darkenColor(baseColor, (i / detail.geometry.length) * 0.5);
+
+                L.polyline(segment, {
+                    color: segmentColor,
+                    weight: 6,
+                    opacity: 0.9
+                }).addTo(routeLayers);
+            }
+        });
+    }
+    
+    function populateDetails(container, solution) {
+        container.html('');
+        const title = `<p class="lead text-center">Total Jarak: <strong>${solution.total_distance_km.toFixed(2)} km</strong></p><hr>`;
+        container.append(title);
+
+        solution.route_details.forEach(detail => {
+            const resultHtml = `<div class="result-item">
+                <strong>Kendaraan ${detail.vehicle_id}:</strong> ${detail.route_str}
+                <br><small class="text-muted">Jarak: <strong>${detail.distance_km.toFixed(2)} km</strong> | Beban: ${detail.load} kg</small>
+            </div>`;
+            container.append(resultHtml);
+        });
+    }
+
+    $('#optimizeBtn').on('click', function() {
+        $('#loader').show();
+        $('#results-container').hide();
+        $(this).prop('disabled', true).text('Mencari...');
+        
+        $.ajax({
+            url: '/solve',
+            method: 'POST',
+            contentType: 'application/json',
+            success: function(response) {
+                $('#loader').hide();
+                $('#results-container').show();
+                $('#optimizeBtn').prop('disabled', false).text('Cari Opsi Terbaik Lagi');
+                
+                const initial = response.initial;
+                const bestOption = response.best_option;
+                const currentTrial = response.current_trial;
+
+                populateDetails($('#current-trial-details'), currentTrial);
+                populateDetails($('#optimized-details'), bestOption);
+                
+                $('#initial-distance').text(`Total Jarak Awal (Acak): ${initial.total_distance_km.toFixed(2)} km`);
+                $('#optimized-distance').text(`Total Jarak Rekor Terbaik: ${bestOption.total_distance_km.toFixed(2)} km`);
+                
+                const savings = initial.total_distance_km - bestOption.total_distance_km;
+                $('#total-savings').text(`Total Penghematan: ${savings.toFixed(2)} km`);
+                
+                drawRoutes(bestOption.route_details);
+            },
+            error: function(jqXHR) {
+                $('#loader').hide();
+                $('#optimizeBtn').prop('disabled', false).text('Cari Opsi Terbaik');
+                alert('Terjadi kesalahan: ' + (jqXHR.responseJSON ? jqXHR.responseJSON.error : 'Error tidak diketahui'));
+            }
+        });
+    });
+
+    // Tampilkan marker nama untuk setiap pelanggan
+    L.marker([depotLat, depotLon]).addTo(map).bindPopup(`<b>${ {{ data.depot.name | tojson }} }</b>`).openPopup();
+    customers.forEach(c => {
+        const nameIcon = L.divIcon({
+            className: 'customer-label',
+            html: `<div>${c.name}</div>`,
+            iconSize: 'auto'
+        });
+        L.marker([c.lat, c.lon], {icon: nameIcon}).addTo(map);
+    });
+</script>
+</body>
+</html>
